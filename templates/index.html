@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stock Analysis</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    body { background: #f0f2f5; }
+    .stat-card .value { font-size: 1.4rem; font-weight: 700; }
+    .stat-card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: .05em; color: #6c757d; }
+    .positive { color: #198754; }
+    .negative { color: #dc3545; }
+    thead.sticky-top th { background: #212529; color: #fff; }
+  </style>
+</head>
+<body>
+<nav class="navbar navbar-dark bg-dark mb-4 shadow-sm">
+  <div class="container">
+    <span class="navbar-brand fw-bold">Stock Analysis</span>
+  </div>
+</nav>
+
+<div class="container pb-5">
+
+  <!-- Search -->
+  <div class="row mb-4">
+    <div class="col-md-5">
+      <div class="input-group input-group-lg shadow-sm">
+        <input id="symbolInput" class="form-control" placeholder="Enter symbol (e.g. AAPL, MSFT)" value="AAPL">
+        <button class="btn btn-primary fw-semibold" onclick="analyze()">Analyze</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="alertBox" class="alert alert-danger d-none"></div>
+
+  <div id="spinner" class="d-none my-5 text-center">
+    <div class="spinner-border text-primary" style="width:3rem;height:3rem;"></div>
+    <div class="mt-2 text-muted">Fetching data…</div>
+  </div>
+
+  <div id="results" class="d-none">
+
+    <h4 id="symbolHeading" class="mb-3 fw-bold"></h4>
+
+    <!-- Stats row -->
+    <div class="row g-3 mb-4" id="statsRow"></div>
+
+    <!-- Charts -->
+    <div class="row g-4 mb-4">
+      <div class="col-lg-8">
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <canvas id="priceChart"></canvas>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-4">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <canvas id="rollingChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table -->
+    <div class="card shadow-sm">
+      <div class="card-header fw-semibold">Historical OHLCV Data</div>
+      <div class="table-responsive" style="max-height:420px;overflow-y:auto;">
+        <table class="table table-sm table-striped table-hover mb-0">
+          <thead class="sticky-top">
+            <tr>
+              <th>Date</th>
+              <th>Open</th>
+              <th>High</th>
+              <th>Low</th>
+              <th>Close</th>
+              <th>Change %</th>
+              <th>Volume</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+let priceChart = null, rollingChart = null;
+
+function $(id) { return document.getElementById(id); }
+function fmt(n, d = 2) { return n == null ? '—' : Number(n).toFixed(d); }
+function fmtVol(n) { return n == null ? '—' : Number(n).toLocaleString(); }
+function fmtChange(chg) {
+  if (chg == null) return '<span class="text-muted">—</span>';
+  const cls = chg >= 0 ? 'positive' : 'negative';
+  return `<span class="${cls}">${chg >= 0 ? '+' : ''}${fmt(chg)}%</span>`;
+}
+
+async function analyze() {
+  const symbol = ($('symbolInput').value || '').trim().toUpperCase();
+  if (!symbol) return;
+
+  $('alertBox').classList.add('d-none');
+  $('results').classList.add('d-none');
+  $('spinner').classList.remove('d-none');
+
+  try {
+    // Fetch from Alpha Vantage, store in DB, and get rolling averages
+    const rollingResp = await fetch(`/api/rolling-average?symbol=${encodeURIComponent(symbol)}&window=5`);
+    if (!rollingResp.ok) {
+      const err = await rollingResp.json();
+      throw new Error(err.error || 'Failed to fetch data');
+    }
+    const rollingData = await rollingResp.json();
+
+    // Read stored OHLCV rows (up to 500)
+    const stockResp = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&limit=500`);
+    const rows = await stockResp.json();
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+
+    renderStats(rows);
+    renderPriceChart(symbol, rows);
+    renderRollingChart(symbol, rows, rollingData.rolling_averages);
+    renderTable(rows);
+
+    $('symbolHeading').textContent = symbol;
+    $('results').classList.remove('d-none');
+  } catch (e) {
+    $('alertBox').textContent = e.message;
+    $('alertBox').classList.remove('d-none');
+  } finally {
+    $('spinner').classList.add('d-none');
+  }
+}
+
+function renderStats(rows) {
+  if (!rows.length) return;
+  const last = rows[rows.length - 1];
+  const prev = rows[rows.length - 2];
+  const change = prev
+    ? ((last.close_price - prev.close_price) / prev.close_price * 100)
+    : null;
+  const highs = rows.map(r => r.high_price).filter(v => v != null);
+  const lows  = rows.map(r => r.low_price).filter(v => v != null);
+  const periodHigh = highs.length ? Math.max(...highs) : null;
+  const periodLow  = lows.length  ? Math.min(...lows)  : null;
+  const avgVol = rows.reduce((s, r) => s + (r.volume || 0), 0) / rows.length;
+
+  const changeColor = change == null ? '' : change >= 0 ? 'positive' : 'negative';
+  const changeStr = change == null ? '—'
+    : `${change >= 0 ? '+' : ''}${fmt(change)}%`;
+
+  const cards = [
+    { label: 'Latest Close', value: `$${fmt(last.close_price)}`, sub: last.date },
+    { label: 'Day Change',   value: changeStr, extraClass: changeColor },
+    { label: 'Period High',  value: periodHigh != null ? `$${fmt(periodHigh)}` : '—' },
+    { label: 'Period Low',   value: periodLow  != null ? `$${fmt(periodLow)}`  : '—' },
+    { label: 'Avg Volume',   value: fmtVol(Math.round(avgVol)) },
+    { label: 'Data Points',  value: rows.length.toString() },
+  ];
+
+  $('statsRow').innerHTML = cards.map(c => `
+    <div class="col-6 col-md-4 col-xl-2">
+      <div class="card shadow-sm stat-card text-center h-100">
+        <div class="card-body py-3">
+          <div class="label">${c.label}</div>
+          <div class="value ${c.extraClass || ''}">${c.value}</div>
+          ${c.sub ? `<div class="text-muted" style="font-size:.75rem">${c.sub}</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderPriceChart(symbol, rows) {
+  if (priceChart) priceChart.destroy();
+  priceChart = new Chart($('priceChart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: rows.map(r => r.date),
+      datasets: [
+        {
+          label: 'Close',
+          data: rows.map(r => r.close_price),
+          borderColor: '#0d6efd',
+          backgroundColor: 'rgba(13,110,253,0.07)',
+          fill: true, pointRadius: 0, tension: 0.1,
+        },
+        {
+          label: 'High',
+          data: rows.map(r => r.high_price),
+          borderColor: 'rgba(25,135,84,0.5)',
+          pointRadius: 0, tension: 0.1, borderDash: [4, 3],
+        },
+        {
+          label: 'Low',
+          data: rows.map(r => r.low_price),
+          borderColor: 'rgba(220,53,69,0.5)',
+          pointRadius: 0, tension: 0.1, borderDash: [4, 3],
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        title: { display: true, text: `${symbol} — Price History` },
+        legend: { position: 'bottom' },
+      },
+      scales: { x: { ticks: { maxTicksLimit: 8 } } },
+    },
+  });
+}
+
+function renderRollingChart(symbol, rows, averages) {
+  if (rollingChart) rollingChart.destroy();
+  // Rolling averages are offset by window size from the start
+  const offset = rows.length - averages.length;
+  const labels = rows.slice(offset).map(r => r.date);
+
+  rollingChart = new Chart($('rollingChart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: '5-Day Rolling Avg Return (%)',
+        data: averages,
+        borderColor: '#6610f2',
+        backgroundColor: 'rgba(102,16,242,0.07)',
+        fill: true, pointRadius: 0, tension: 0.2,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        title: { display: true, text: '5-Day Rolling Avg Return (%)' },
+        legend: { display: false },
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 6 } },
+        y: { ticks: { callback: v => v + '%' } },
+      },
+    },
+  });
+}
+
+function renderTable(rows) {
+  const reversed = [...rows].reverse();
+  $('tableBody').innerHTML = reversed.map((r, i) => {
+    const prev = reversed[i + 1];
+    const chg = prev
+      ? ((r.close_price - prev.close_price) / prev.close_price * 100)
+      : null;
+    return `<tr>
+      <td>${r.date}</td>
+      <td>${r.open_price  != null ? '$' + fmt(r.open_price)  : '—'}</td>
+      <td>${r.high_price  != null ? '$' + fmt(r.high_price)  : '—'}</td>
+      <td>${r.low_price   != null ? '$' + fmt(r.low_price)   : '—'}</td>
+      <td>$${fmt(r.close_price)}</td>
+      <td>${fmtChange(chg)}</td>
+      <td>${fmtVol(r.volume)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// Load default symbol on page open
+analyze();
+</script>
+</body>
+</html>
