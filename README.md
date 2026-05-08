@@ -2,8 +2,6 @@
 
 A lightweight Flask API that fetches daily stock prices from [Alpha Vantage](https://www.alphavantage.co/), stores them in SQLite, and computes rolling average daily returns.
 
-Built by [@mar_antaya](https://github.com/mar-antaya) as part of an applied ML portfolio.
-
 ## Endpoints
 
 | Method | Path | Description |
